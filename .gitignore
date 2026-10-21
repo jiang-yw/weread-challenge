@@ -1,1 +1,15 @@
 __pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+Dockerfile.bak
+*.log
+.weread/
+cookies.json
+notification_config.json
+feishu_login_state.json
+last_run.json
+run.pid
+run.lock
+screenshot-*.png

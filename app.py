@@ -71,8 +71,8 @@ SECRET_ENV_KEYS = (
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "weread-challenge-secret-key-2024")
-app.config["SESSION_COOKIE_SAMESITE"] = "None"
-app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = False
 
 
 # ─── Auth ──────────────────────────────────────────────────────────────────────
