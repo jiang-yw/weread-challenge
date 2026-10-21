@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+Dockerfile.bak
+__pycache__
+**/__pycache__
+*.pyc
+*.log
+cookies.json
+notification_config.json
+feishu_login_state.json
+tests
+scripts
+docs
