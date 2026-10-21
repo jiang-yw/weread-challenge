@@ -1,4 +1,9 @@
 (() => {
+  const favicon = document.querySelector('link[rel="icon"]');
+  if (favicon) {
+    favicon.href = new URL("weread.jpg", document.currentScript.src).href;
+    favicon.type = "image/jpeg";
+  }
   let theme = "light";
   try { if (localStorage.getItem("weread-theme") === "dark") theme = "dark"; } catch {}
   document.documentElement.dataset.theme = theme;

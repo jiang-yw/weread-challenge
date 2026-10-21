@@ -28,7 +28,7 @@ h2 { font-size: 16px; font-weight: 650; }
 .page-header, .brand, .header-actions, .section-head, .actions, .tabs, .log-toolbar, .log-footer { display: flex; align-items: center; gap: 12px; }
 .page-header { justify-content: space-between; margin-bottom: 26px; }
 .brand { gap: 13px; }
-.brand-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; background: var(--accent); color: var(--panel); font-size: 24px; font-weight: 650; }
+.brand-icon { display: block; flex-shrink: 0; width: 44px; height: 44px; border-radius: 10px; background: url("weread.jpg") center / cover no-repeat; color: transparent; font-size: 0; }
 .brand p { font-size: 12px; margin-top: 1px; }
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 12px; line-height: 1.7; margin-top: 4px; }
@@ -122,7 +122,7 @@ dialog p { margin: 12px 0 24px; font-size: 13px; }
 @media (max-width: 700px) {
   .page { padding: 18px 14px; }
   .page-header { align-items: flex-start; gap: 10px; }
-  .brand-icon { width: 38px; height: 38px; font-size: 20px; }
+  .brand-icon { width: 38px; height: 38px; }
   h1 { font-size: 20px; }
   .header-actions { gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
   .connection { width: 100%; text-align: right; font-size: 10px; }
