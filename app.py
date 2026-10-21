@@ -35,6 +35,7 @@ from flask import (
     Flask, Response, abort, jsonify, redirect,
     render_template_string, request, send_file, session,
 )
+from feishu_notify import load_webhook_config, send_feishu, write_json
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 DATA_DIR = Path(os.environ.get("WEREAD_DATA_DIR", "/data/.weread"))
@@ -61,6 +62,7 @@ PUBLIC_ENV_KEYS = (
 )
 SECRET_ENV_KEYS = (
     "BARK_KEY", "EMAIL_PASS", "EMAIL_USER", "EMAIL_TO", "EMAIL_FROM", "EMAIL_SMTP",
+    "WEBHOOK_URL", "WEBHOOK_SECRET",
 )
 
 app = Flask(__name__)
@@ -231,7 +233,7 @@ def _notification_status() -> dict:
     email_set = all(os.environ.get(f) for f in email_fields)
     channels.append({"name": "Email", "configured": email_set, "missing_fields": [f for f in email_fields if not os.environ.get(f)]})
 
-    if os.environ.get("WEBHOOK_URL"):
+    if load_webhook_config(DATA_DIR)["webhook_url"]:
         channels.append({"name": "Webhook", "configured": True})
     else:
         channels.append({"name": "Webhook", "configured": False})
@@ -433,10 +435,10 @@ NOTIF_SCHEMA = {
         "email_user": "", "email_pass": "", "email_to": "",
         "email_from": "", "email_smtp": "", "email_port": "465",
     },
-    "webhook": {"webhook_url": ""},
+    "webhook": {"webhook_url": "", "webhook_secret": "", "panel_url": ""},
 }
 
-_NOTIF_SECRET_FIELDS = {"bark_key", "pushplus_token", "email_pass"}
+_NOTIF_SECRET_FIELDS = {"bark_key", "pushplus_token", "email_pass", "webhook_url", "webhook_secret"}
 _NOTIF_ENV_MAP = {
     "bark_key": "BARK_KEY",
     "pushplus_token": "PUSHPLUS_TOKEN",
@@ -444,6 +446,8 @@ _NOTIF_ENV_MAP = {
     "email_to": "EMAIL_TO",     "email_from": "EMAIL_FROM",
     "email_smtp": "EMAIL_SMTP", "email_port": "EMAIL_PORT",
     "webhook_url": "WEBHOOK_URL",
+    "webhook_secret": "WEBHOOK_SECRET",
+    "panel_url": "WEREAD_PANEL_URL",
 }
 
 
@@ -456,8 +460,12 @@ def _load_notif_config() -> dict:
             saved = json.loads(NOTIF_CONFIG.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
         for ch, fields in cfg.items():
             saved_ch = saved.get(ch) or {}
+            if not isinstance(saved_ch, dict):
+                continue
             for field in fields:
                 val = saved_ch.get(field, "")
                 if isinstance(val, str) and val and val != "***set***":
@@ -492,20 +500,26 @@ def route_notif_get() -> Response:
 def route_notif_save() -> Response:
     """Persist notification config; ``***set***`` keeps the existing secret value."""
     incoming = request.get_json(silent=True) or {}
+    if not isinstance(incoming, dict):
+        return jsonify({"ok": False, "reason": "配置必须是 JSON 对象"}), 400
     existing: dict = {}
     if NOTIF_CONFIG.exists():
         try:
             existing = json.loads(NOTIF_CONFIG.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
 
     cleaned: dict = {}
     for ch, fields in NOTIF_SCHEMA.items():
         cleaned[ch] = {}
         sub_in = incoming.get(ch) or {}
+        if not isinstance(sub_in, dict):
+            return jsonify({"ok": False, "reason": "渠道配置必须是 JSON 对象"}), 400
         sub_old = (existing.get(ch) or {}) if isinstance(existing.get(ch), dict) else {}
         for field in fields:
-            val = sub_in.get(field, "")
+            val = sub_in.get(field, sub_old.get(field, ""))
             if not isinstance(val, str):
                 val = str(val)
             val = val.strip()
@@ -514,14 +528,18 @@ def route_notif_save() -> Response:
             cleaned[ch][field] = val
 
     try:
-        NOTIF_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        with NOTIF_CONFIG.open("w", encoding="utf-8") as f:
-            json.dump(cleaned, f, indent=2, ensure_ascii=False)
+        write_json(NOTIF_CONFIG, cleaned)
     except OSError as exc:
         return jsonify({"ok": False, "reason": str(exc)}), 500
 
     return jsonify({"ok": True})
 
+
+@app.route("/api/notification/test", methods=["POST"])
+def route_notif_test() -> Response:
+    cfg = load_webhook_config(DATA_DIR)
+    ok, reason = send_feishu(cfg, "微信读书：飞书通知测试\nWebhook 配置正常，可以接收重新登录提醒。")
+    return jsonify({"ok": ok, "reason": reason}), (200 if ok else 502)
 
 
 
@@ -610,6 +628,9 @@ _INDEX_HTML = r"""<!doctype html>
            padding: 7px 14px; font-size: 13px; cursor: pointer; margin-right: 6px; margin-top: 6px; }
   button:disabled { background: #30363d; color: var(--muted); cursor: not-allowed; }
   button.danger { background: var(--warn); }
+  .notif-input { width: 100%; margin: 5px 0 10px; padding: 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .notif-help { font-size: 12px; color: var(--muted); line-height: 1.6; }
   pre.log { background: #010409; border: 1px solid var(--border); border-radius: 6px;
             color: #c9d1d9; font-size: 12px; padding: 10px; max-height: 240px;
             overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; }
@@ -647,6 +668,22 @@ _INDEX_HTML = r"""<!doctype html>
       <div class="row">
         <span class="k">cookies</span><span class="v" id="cookies">—</span>
       </div>
+    </div>
+
+    <div class="card" style="grid-column: 1 / -1">
+      <h2>飞书登录提醒</h2>
+      <form id="feishu-form">
+        <label class="notif-help" for="feishu-url">群机器人 Webhook 地址</label>
+        <input class="notif-input" id="feishu-url" type="password" autocomplete="off" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…">
+        <label class="notif-help" for="feishu-secret">签名密钥（机器人启用签名校验时填写）</label>
+        <input class="notif-input" id="feishu-secret" type="password" autocomplete="off">
+        <label class="notif-help" for="feishu-panel">管理面板地址（可选，用于通知中跳转）</label>
+        <input class="notif-input" id="feishu-panel" type="url" placeholder="你能访问的管理面板地址">
+        <div class="notif-help">检测到需要重新扫码时提醒；登录成功前只提醒一次。机器人使用关键词校验时，请添加“微信读书”。</div>
+        <button id="feishu-save" type="submit" disabled>保存配置</button>
+        <button id="feishu-test" type="button" disabled>发送测试通知</button>
+        <div id="feishu-result" class="notif-help" role="status"></div>
+      </form>
     </div>
 
     <div class="card" style="grid-column: 1 / -1">
@@ -794,6 +831,52 @@ $("restart-btn").addEventListener("click", async () => {
   }
 });
 
+async function loadFeishu() {
+  const res = await fetch("/api/notification", {cache: "no-store"});
+  if (!res.ok) throw new Error("加载通知配置失败");
+  const data = await res.json();
+  const cfg = data.config.webhook || {};
+  $("feishu-url").value = cfg.webhook_url || "";
+  $("feishu-secret").value = cfg.webhook_secret || "";
+  $("feishu-panel").value = cfg.panel_url || "";
+  $("feishu-save").disabled = false;
+  $("feishu-test").disabled = false;
+}
+
+$("feishu-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("feishu-save").disabled = true;
+  try {
+    const res = await fetch("/api/notification", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({webhook: {
+        webhook_url: $("feishu-url").value,
+        webhook_secret: $("feishu-secret").value,
+        panel_url: $("feishu-panel").value
+      }})
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.reason || "保存失败");
+    await loadFeishu();
+    $("feishu-result").textContent = "配置已保存；可发送测试通知确认。";
+  } catch (error) {
+    $("feishu-result").textContent = error.message;
+  } finally { $("feishu-save").disabled = false; }
+});
+
+$("feishu-test").addEventListener("click", async () => {
+  $("feishu-test").disabled = true;
+  $("feishu-result").textContent = "正在发送已保存配置的测试通知…";
+  try {
+    const res = await fetch("/api/notification/test", {method: "POST"});
+    const data = await res.json();
+    $("feishu-result").textContent = data.reason || "测试失败";
+  } catch {
+    $("feishu-result").textContent = "测试请求失败";
+  } finally { $("feishu-test").disabled = false; }
+});
+
+loadFeishu().catch((error) => { $("feishu-result").textContent = error.message; });
 refresh(); loadLogs();
 _scheduleAutoRefresh(null);
 </script>

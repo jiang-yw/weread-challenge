@@ -33,7 +33,7 @@ RUN userdel -r node 2>/dev/null || true \
     && chown -R user:user /data
 
 WORKDIR /app
-COPY --chown=user:user app.py entrypoint.sh start_reading.sh ./
+COPY --chown=user:user app.py entrypoint.sh start_reading.sh feishu_notify.py ./
 RUN chmod +x entrypoint.sh start_reading.sh \
     && chown -R user:user /app
 

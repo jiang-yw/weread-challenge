@@ -6,6 +6,7 @@
 set -uo pipefail
 
 TRIGGER="${1:-manual}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="${WEREAD_DATA_DIR:-/data/.weread}"
 LOG_FILE="${DATA_DIR}/app.log"
 LOCK_FILE="${DATA_DIR}/run.lock"
@@ -72,7 +73,7 @@ write_state "running"
 log "▶ starting weread-selenium-cli run (trigger=$TRIGGER, duration=${WEREAD_DURATION:-68}m)"
 
 set +e
-weread-selenium-cli run >>"$LOG_FILE" 2>&1
+python3 "$SCRIPT_DIR/feishu_notify.py" >>"$LOG_FILE" 2>&1
 EXIT_CODE=$?
 set -e
 
