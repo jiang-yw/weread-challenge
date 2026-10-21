@@ -14,3 +14,12 @@
 - Build used the current working tree, including pre-existing local Dockerfile and app.py changes. Those existing changes remain uncommitted.
 - Dockerfile SHA-256: `74921d0f78795c98ad0ae83555c10088daad995ad3634af9a08136414a70904d`
 - app.py SHA-256: `9a1836fb6e4f8135bc462fd9643883351da38f7140d59e32fb8f5cc201abf546`
+
+## Icon update
+
+- Completed (UTC): 2026-10-21T06:27:27.461505+00:00
+- Dashboard, login and favicon use the user-supplied WeRead image.
+- New image prepared: `weread-challenge:latest` (`sha256:094c62cc166d329d4a18326bd63edf13c98d7a2b00f2e207ac987e1958320dd0`).
+- Updated static files and templates synchronized to the existing container; container ID and start time unchanged.
+- Built-image asset hashes match source; live HTTP asset hashes, login and health checks passed on port 8860.
+- Running container continues using its original image ID; recreating from the updated image will retain the new icon.
