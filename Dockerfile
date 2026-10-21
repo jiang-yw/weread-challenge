@@ -34,6 +34,9 @@ RUN userdel -r node 2>/dev/null || true \
 
 WORKDIR /app
 COPY --chown=user:user app.py entrypoint.sh start_reading.sh feishu_notify.py ./
+COPY --chown=user:user notification_settings.py notification_delivery.py dashboard_helpers.py ./
+COPY --chown=user:user templates ./templates
+COPY --chown=user:user static ./static
 RUN chmod +x entrypoint.sh start_reading.sh \
     && chown -R user:user /app
 

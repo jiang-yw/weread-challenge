@@ -3,7 +3,7 @@
 
 Features:
   - Password-protected Web UI (default: linuxdo123)
-  - Dark-themed status dashboard with auto-refresh
+  - Light/dark dashboard with auto-refresh
   - QR code display + manual restart button
   - Manual trigger reading / restart reading
   - Background scheduler (every N hours)
@@ -30,12 +30,16 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import (
     Flask, Response, abort, jsonify, redirect,
-    render_template_string, request, send_file, session,
+    render_template, request, send_file, session,
 )
-from feishu_notify import load_webhook_config, send_feishu, write_json
+from feishu_notify import WEBHOOK_FIELDS, send_feishu, write_json
+from dashboard_helpers import log_entries, reading_settings, tail_lines
+from notification_delivery import send_bark, send_email
+from notification_settings import ENV_MAP, SCHEMA, SECRET_FIELDS, channel_status, load_config
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 DATA_DIR = Path(os.environ.get("WEREAD_DATA_DIR", "/data/.weread"))
@@ -77,7 +81,7 @@ _NO_AUTH_PATHS = {"/healthz", "/login"}
 
 @app.before_request
 def _check_auth():
-    if request.path in _NO_AUTH_PATHS:
+    if request.path in _NO_AUTH_PATHS or request.endpoint == "static":
         return None
     if session.get("authed"):
         return None
@@ -89,12 +93,12 @@ def _check_auth():
 @app.route("/login", methods=["GET", "POST"])
 def route_login():
     if request.method == "GET":
-        return render_template_string(_LOGIN_HTML)
+        return render_template("login.html")
     pwd = (request.form.get("password") or "").strip()
     if pwd == WEB_PASSWORD:
         session["authed"] = True
         return redirect("/")
-    return render_template_string(_LOGIN_HTML, error=True)
+    return render_template("login.html", error=True)
 
 
 @app.route("/logout")
@@ -139,9 +143,10 @@ def _last_run() -> dict:
 
 
 def _cookies_status() -> tuple[str, float | None]:
-    if not COOKIES_JSON.exists():
+    age = _file_age_seconds(COOKIES_JSON)
+    if age is None:
         return ("missing", None)
-    age_days = _file_age_seconds(COOKIES_JSON) / 86400.0
+    age_days = age / 86400.0
     if age_days > COOKIE_TTL_DAYS:
         return ("expired", age_days)
     return ("valid", age_days)
@@ -173,15 +178,18 @@ def _reading_state() -> dict:
     pid = _pid_alive()
     cookies, cookies_age_days = _cookies_status()
     qr_fresh, qr_age = _qr_status()
+    qr_active = pid is not None and qr_fresh and (cookies_age_days is None or qr_age < cookies_age_days * 86400)
 
     if pid is not None:
-        if qr_fresh and cookies != "valid":
+        if qr_active:
             phase = "waiting_login"
         else:
             phase = "running"
     else:
-        if qr_fresh and cookies != "valid":
+        if qr_active:
             phase = "waiting_login"
+        elif last.get("status") == "failed":
+            phase = "failed"
         else:
             phase = "idle"
 
@@ -200,7 +208,7 @@ def _reading_state() -> dict:
         "phase": phase,
         "pid": pid,
         "cookies": {"status": cookies, "age_days": cookies_age_days},
-        "login_qr": {"present": LOGIN_PNG.exists(), "fresh": qr_fresh, "age_seconds": qr_age},
+        "login_qr": {"present": LOGIN_PNG.exists(), "fresh": qr_fresh, "active": qr_active, "age_seconds": qr_age},
         "last_run": last,
         "eta_seconds": eta_seconds,
         "is_paused": _is_paused(pid),
@@ -217,27 +225,7 @@ def _public_env() -> dict:
 
 
 def _notification_status() -> dict:
-    """Check which notification channels are configured."""
-    channels = []
-    if os.environ.get("BARK_KEY"):
-        channels.append({"name": "Bark", "configured": True})
-    else:
-        channels.append({"name": "Bark", "configured": False})
-
-    if os.environ.get("PUSHPLUS_TOKEN"):
-        channels.append({"name": "PushPlus", "configured": True})
-    else:
-        channels.append({"name": "PushPlus", "configured": False})
-
-    email_fields = ["EMAIL_USER", "EMAIL_PASS", "EMAIL_TO", "EMAIL_SMTP"]
-    email_set = all(os.environ.get(f) for f in email_fields)
-    channels.append({"name": "Email", "configured": email_set, "missing_fields": [f for f in email_fields if not os.environ.get(f)]})
-
-    if load_webhook_config(DATA_DIR)["webhook_url"]:
-        channels.append({"name": "Webhook", "configured": True})
-    else:
-        channels.append({"name": "Webhook", "configured": False})
-
+    channels = channel_status(_load_notif_config())
     return {"channels": channels, "any_configured": any(c["configured"] for c in channels)}
 
 
@@ -271,7 +259,8 @@ def _start_background_threads() -> None:
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @app.route("/status")
 def route_status() -> Response:
-    return jsonify({"reading": _reading_state(), "env": _public_env(), "notifications": _notification_status()})
+    return jsonify({"reading": _reading_state(), "env": _public_env(), "settings": reading_settings(),
+                    "notifications": _notification_status()})
 
 
 @app.route("/login.png")
@@ -365,120 +354,38 @@ def _kill_reader(pid: int | None) -> None:
     threading.Thread(target=_wait_and_force, daemon=True).start()
 
 
+def _log_limit(default: int, maximum: int) -> int:
+    try:
+        return max(1, min(int(request.args.get("n", default)), maximum))
+    except ValueError:
+        abort(400)
+
+
 @app.route("/logs")
 def route_logs() -> Response:
-    n = max(1, min(int(request.args.get("n", 200)), 5000))
-    if not APP_LOG.exists():
-        return Response("", mimetype="text/plain")
-    with APP_LOG.open("rb") as f:
-        try:
-            f.seek(-min(256_000, n * 400), os.SEEK_END)
-        except OSError:
-            f.seek(0)
-        tail = f.read().decode("utf-8", errors="replace").splitlines()[-n:]
-    return Response("\n".join(tail), mimetype="text/plain")
-
-
+    return Response("\n".join(tail_lines(APP_LOG, _log_limit(200, 5000))), mimetype="text/plain")
 
 
 @app.route("/logs/clean")
 def route_logs_clean() -> Response:
-    """Return filtered, structured log entries."""
-    n = max(1, min(int(request.args.get("n", 50)), 500))
-    if not APP_LOG.exists():
-        return jsonify({"entries": [], "total": 0})
-
-    import re
-    # Keywords that indicate meaningful log lines
-    meaningful = re.compile(
-        r'(start_reading|login|cookie|reading|error|fail|success|complet|warn|'
-        r'screenshot|book|duration|prune|✓|✗|▶|initial|manual|scheduler|'
-        r'starting|finished|exited|run )',
-        re.IGNORECASE,
-    )
-
-    with APP_LOG.open("r", encoding="utf-8", errors="replace") as f:
-        all_lines = f.readlines()
-
-    entries = []
-    for line in all_lines:
-        stripped = line.rstrip("\n")
-        if not stripped.strip():
-            continue
-        if not meaningful.search(stripped):
-            continue
-
-        # Determine level
-        lower = stripped.lower()
-        if "error" in lower or "fail" in lower or "✗" in stripped:
-            level = "error"
-        elif "success" in lower or "complet" in lower or "✓" in stripped:
-            level = "success"
-        elif "warn" in lower:
-            level = "warning"
-        else:
-            level = "info"
-
-        entries.append({"text": stripped, "level": level})
-
-    # Take last N entries
-    total = len(entries)
-    entries = entries[-n:]
-    return jsonify({"entries": entries, "total": total})
+    n = _log_limit(80, 500)
+    entries = log_entries(tail_lines(APP_LOG, 10000))
+    level = request.args.get("level", "all")
+    query = request.args.get("q", "").strip().lower()
+    if level != "all":
+        entries = [entry for entry in entries if entry["level"] == level]
+    if query:
+        entries = [entry for entry in entries if query in entry["text"].lower()]
+    return jsonify({"entries": entries[-n:], "total": len(entries)})
 
 
 # ─── Notification config ──────────────────────────────────────────────────────
-NOTIF_SCHEMA = {
-    "bark": {"bark_key": "", "bark_url": "https://api.day.app"},
-    "pushplus": {"pushplus_token": ""},
-    "email": {
-        "email_user": "", "email_pass": "", "email_to": "",
-        "email_from": "", "email_smtp": "", "email_port": "465",
-    },
-    "webhook": {"webhook_url": "", "webhook_secret": "", "panel_url": ""},
-}
-
-_NOTIF_SECRET_FIELDS = {"bark_key", "pushplus_token", "email_pass", "webhook_url", "webhook_secret"}
-_NOTIF_ENV_MAP = {
-    "bark_key": "BARK_KEY",
-    "pushplus_token": "PUSHPLUS_TOKEN",
-    "email_user": "EMAIL_USER", "email_pass": "EMAIL_PASS",
-    "email_to": "EMAIL_TO",     "email_from": "EMAIL_FROM",
-    "email_smtp": "EMAIL_SMTP", "email_port": "EMAIL_PORT",
-    "webhook_url": "WEBHOOK_URL",
-    "webhook_secret": "WEBHOOK_SECRET",
-    "panel_url": "WEREAD_PANEL_URL",
-}
+NOTIF_SCHEMA = SCHEMA
+_NOTIF_SECRET_FIELDS = SECRET_FIELDS
 
 
 def _load_notif_config() -> dict:
-    """Read saved notification config from disk; env vars override saved values."""
-    cfg = {ch: dict(fields) for ch, fields in NOTIF_SCHEMA.items()}
-
-    if NOTIF_CONFIG.exists():
-        try:
-            saved = json.loads(NOTIF_CONFIG.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            saved = {}
-        if not isinstance(saved, dict):
-            saved = {}
-        for ch, fields in cfg.items():
-            saved_ch = saved.get(ch) or {}
-            if not isinstance(saved_ch, dict):
-                continue
-            for field in fields:
-                val = saved_ch.get(field, "")
-                if isinstance(val, str) and val and val != "***set***":
-                    cfg[ch][field] = val
-
-    for ch, fields in cfg.items():
-        for field in fields:
-            env_key = _NOTIF_ENV_MAP.get(field)
-            if env_key:
-                env_val = os.environ.get(env_key, "")
-                if env_val:
-                    cfg[ch][field] = env_val
-    return cfg
+    return load_config(NOTIF_CONFIG)
 
 
 @app.route("/api/notification", methods=["GET"])
@@ -493,13 +400,15 @@ def route_notif_get() -> Response:
                 masked[ch][k] = "***set***" if v else ""
             else:
                 masked[ch][k] = v
-    return jsonify({"ok": True, "config": masked, "schema": NOTIF_SCHEMA})
+    locked = [field for field, key in ENV_MAP.items() if os.environ.get(key)]
+    return jsonify({"ok": True, "config": masked, "schema": NOTIF_SCHEMA,
+                    "locked_fields": locked, "channels": channel_status(cfg)})
 
 
 @app.route("/api/notification", methods=["POST"])
 def route_notif_save() -> Response:
     """Persist notification config; ``***set***`` keeps the existing secret value."""
-    incoming = request.get_json(silent=True) or {}
+    incoming = request.get_json(silent=True)
     if not isinstance(incoming, dict):
         return jsonify({"ok": False, "reason": "配置必须是 JSON 对象"}), 400
     existing: dict = {}
@@ -514,17 +423,37 @@ def route_notif_save() -> Response:
     cleaned: dict = {}
     for ch, fields in NOTIF_SCHEMA.items():
         cleaned[ch] = {}
-        sub_in = incoming.get(ch) or {}
+        sub_in = incoming.get(ch, {})
         if not isinstance(sub_in, dict):
             return jsonify({"ok": False, "reason": "渠道配置必须是 JSON 对象"}), 400
         sub_old = (existing.get(ch) or {}) if isinstance(existing.get(ch), dict) else {}
         for field in fields:
-            val = sub_in.get(field, sub_old.get(field, ""))
+            if field == "enabled":
+                if field in sub_in:
+                    if not isinstance(sub_in[field], bool):
+                        return jsonify({"ok": False, "reason": "启用开关必须为布尔值"}), 400
+                    cleaned[ch][field] = sub_in[field]
+                elif isinstance(sub_old.get(field), bool):
+                    cleaned[ch][field] = sub_old[field]
+                continue
+            val = sub_in.get(field, sub_old.get(field, fields[field]))
             if not isinstance(val, str):
                 val = str(val)
             val = val.strip()
             if val == "***set***" and field in _NOTIF_SECRET_FIELDS:
                 val = sub_old.get(field, "") if isinstance(sub_old.get(field, ""), str) else ""
+            if val and field in {"bark_url", "webhook_url", "panel_url"}:
+                try:
+                    parsed = urlsplit(val)
+                    valid_url = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                    parsed.port
+                except ValueError:
+                    valid_url = False
+                if not valid_url:
+                    return jsonify({"ok": False, "reason": "服务器、Webhook 和面板地址须为有效的 HTTP 或 HTTPS URL"}), 400
+            if field == "email_port" and val:
+                if not val.isdecimal() or not 1 <= int(val) <= 65535:
+                    return jsonify({"ok": False, "reason": "SMTP 端口须为 1 到 65535 的整数"}), 400
             cleaned[ch][field] = val
 
     try:
@@ -537,8 +466,18 @@ def route_notif_save() -> Response:
 
 @app.route("/api/notification/test", methods=["POST"])
 def route_notif_test() -> Response:
-    cfg = load_webhook_config(DATA_DIR)
-    ok, reason = send_feishu(cfg, "微信读书：飞书通知测试\nWebhook 配置正常，可以接收重新登录提醒。")
+    incoming = request.get_json(silent=True)
+    channel = incoming.get("channel", "webhook") if isinstance(incoming, dict) else "webhook"
+    cfg = _load_notif_config()
+    if channel == "webhook":
+        fields = {field: cfg[channel][field] for field in WEBHOOK_FIELDS}
+        ok, reason = send_feishu(fields, "微信读书：飞书通知测试\nWebhook 配置正常，可以接收重新登录提醒。")
+    elif channel == "bark":
+        ok, reason = send_bark(cfg[channel], "微信读书：Bark 通知测试")
+    elif channel == "email":
+        ok, reason = send_email(cfg[channel], "微信读书：邮件通知测试，配置正常。")
+    else:
+        return jsonify({"ok": False, "reason": "不支持的通知渠道"}), 400
     return jsonify({"ok": ok, "reason": reason}), (200 if ok else 502)
 
 
@@ -550,339 +489,8 @@ def route_health() -> Response:
 
 @app.route("/")
 def route_index() -> str:
-    return render_template_string(_INDEX_HTML, env=_public_env())
+    return render_template("index.html")
 
-
-# ─── Login page HTML ──────────────────────────────────────────────────────────
-_LOGIN_HTML = r"""<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WeRead Challenge - Login</title>
-<style>
-  :root { --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --err: #f85149; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 32px; width: 320px; text-align: center; }
-  h1 { font-size: 20px; margin: 0 0 24px; }
-  input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 14px; margin-bottom: 16px; outline: none; }
-  input:focus { border-color: var(--accent); }
-  button { width: 100%; padding: 10px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; }
-  .err { color: var(--err); font-size: 13px; margin-bottom: 12px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>📖 WeRead Challenge</h1>
-  {% if error %}<div class="err">密码错误，请重试</div>{% endif %}
-  <form method="POST">
-    <input type="password" name="password" placeholder="输入密码" autofocus>
-    <button type="submit">登录</button>
-  </form>
-</div>
-</body>
-</html>
-"""
-
-
-_INDEX_HTML = r"""<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WeRead Challenge</title>
-<style>
-  :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d;
-    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-    --ok: #3fb950; --warn: #d29922; --err: #f85149;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-         background: var(--bg); color: var(--text); padding: 16px; }
-  h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
-  h1 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
-  .grid { display: grid; gap: 12px; max-width: 720px; margin: 0 auto;
-          grid-template-columns: 1fr; }
-  @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-          padding: 14px 16px; }
-  .card h2 { margin: 0 0 10px; font-size: 13px; color: var(--muted);
-             font-weight: 500; text-transform: uppercase; letter-spacing: 0.4px; }
-  .row { display: flex; justify-content: space-between; padding: 4px 0;
-         border-bottom: 1px dashed #21262d; font-size: 14px; }
-  .row:last-child { border-bottom: none; }
-  .row .k { color: var(--muted); }
-  .row .v { font-family: ui-monospace, "SF Mono", monospace; font-size: 13px; }
-  .pill { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px;
-          font-weight: 500; }
-  .pill.running { background: rgba(63,185,80,0.16); color: var(--ok); }
-  .pill.waiting_login { background: rgba(210,153,34,0.18); color: var(--warn); }
-  .pill.idle { background: rgba(139,148,158,0.2); color: var(--muted); }
-  .pill.failed { background: rgba(248,81,73,0.2); color: var(--err); }
-  img.qr { display: block; max-width: 280px; width: 100%; border-radius: 6px;
-           background: #fff; padding: 8px; margin-top: 8px; }
-  .qr-empty { color: var(--muted); font-size: 13px; padding: 14px 0; }
-  button { background: var(--accent); color: #fff; border: none; border-radius: 6px;
-           padding: 7px 14px; font-size: 13px; cursor: pointer; margin-right: 6px; margin-top: 6px; }
-  button:disabled { background: #30363d; color: var(--muted); cursor: not-allowed; }
-  button.danger { background: var(--warn); }
-  .notif-input { width: 100%; margin: 5px 0 10px; padding: 8px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--bg); color: var(--text); }
-  .notif-help { font-size: 12px; color: var(--muted); line-height: 1.6; }
-  pre.log { background: #010409; border: 1px solid var(--border); border-radius: 6px;
-            color: #c9d1d9; font-size: 12px; padding: 10px; max-height: 240px;
-            overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; }
-  .footer { color: var(--muted); font-size: 11px; text-align: center;
-            padding-top: 16px; }
-  a { color: var(--accent); text-decoration: none; }
-  .countdown { font-size: 22px; font-family: ui-monospace, monospace; color: var(--accent); }
-</style>
-</head>
-<body>
-  <h1>📖 WeRead Challenge <small id="now"></small></h1>
-  <div class="grid">
-    <div class="card">
-      <h2>状态</h2>
-      <div class="row"><span class="k">阶段</span><span class="v"><span id="phase" class="pill idle">—</span></span></div>
-      <div class="row"><span class="k">PID</span><span class="v" id="pid">—</span></div>
-      <div class="row"><span class="k">本次剩余</span><span class="v countdown" id="eta">—</span></div>
-      <div class="row"><span class="k">上次开始</span><span class="v" id="started_at">—</span></div>
-      <div class="row"><span class="k">上次结束</span><span class="v" id="ended_at">—</span></div>
-      <div class="row"><span class="k">上次结果</span><span class="v" id="last_status">—</span></div>
-      <div style="margin-top:10px">
-        <button id="start-btn">▶ 手动触发阅读</button>
-        <button id="restart-btn" class="danger">🔄 重启阅读</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>登录二维码</h2>
-      <div id="qr-block">
-        <div class="qr-empty">等待容器首次启动后生成…</div>
-      </div>
-      <div class="row" style="margin-top:6px">
-        <span class="k">二维码时间</span><span class="v" id="qr_age">—</span>
-      </div>
-      <div class="row">
-        <span class="k">cookies</span><span class="v" id="cookies">—</span>
-      </div>
-    </div>
-
-    <div class="card" style="grid-column: 1 / -1">
-      <h2>飞书登录提醒</h2>
-      <form id="feishu-form">
-        <label class="notif-help" for="feishu-url">群机器人 Webhook 地址</label>
-        <input class="notif-input" id="feishu-url" type="password" autocomplete="off" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…">
-        <label class="notif-help" for="feishu-secret">签名密钥（机器人启用签名校验时填写）</label>
-        <input class="notif-input" id="feishu-secret" type="password" autocomplete="off">
-        <label class="notif-help" for="feishu-panel">管理面板地址（可选，用于通知中跳转）</label>
-        <input class="notif-input" id="feishu-panel" type="url" placeholder="你能访问的管理面板地址">
-        <div class="notif-help">检测到需要重新扫码时提醒；登录成功前只提醒一次。机器人使用关键词校验时，请添加“微信读书”。</div>
-        <button id="feishu-save" type="submit" disabled>保存配置</button>
-        <button id="feishu-test" type="button" disabled>发送测试通知</button>
-        <div id="feishu-result" class="notif-help" role="status"></div>
-      </form>
-    </div>
-
-    <div class="card" style="grid-column: 1 / -1">
-      <h2>配置 (敏感值已隐藏)</h2>
-      <div id="env"></div>
-    </div>
-
-    <div class="card" style="grid-column: 1 / -1">
-      <h2>最近日志 <a href="/logs?n=500" target="_blank" style="float:right;font-size:12px">查看更多</a></h2>
-      <pre class="log" id="logs">加载中…</pre>
-    </div>
-  </div>
-  <div class="footer">
-    <a href="/logout">退出登录</a> · auto-refresh 30s · <a href="/status">/status</a> · <a href="/healthz">/healthz</a>
-  </div>
-
-<script>
-const $ = (id) => document.getElementById(id);
-
-function fmtSeconds(s) {
-  if (s == null) return "—";
-  s = Math.max(0, Math.round(s));
-  const m = Math.floor(s / 60), sec = s % 60;
-  return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
-}
-function fmtAge(s) {
-  if (s == null) return "—";
-  if (s < 60) return Math.round(s) + "s 前";
-  if (s < 3600) return Math.round(s/60) + "min 前";
-  if (s < 86400) return Math.round(s/3600) + "h 前";
-  return Math.round(s/86400) + "d 前";
-}
-function fmtTime(iso) {
-  if (!iso) return "—";
-  try { return new Date(iso).toLocaleString(); } catch { return iso; }
-}
-
-let _lastPhase = null;
-let _refreshTimer = null;
-let _logTimer = null;
-
-function _scheduleAutoRefresh(phase) {
-  const ms = phase === "waiting_login" ? 5000 : 30000;
-  if (_refreshTimer) clearInterval(_refreshTimer);
-  if (_logTimer) clearInterval(_logTimer);
-  _refreshTimer = setInterval(refresh, ms);
-  _logTimer = setInterval(loadLogs, ms);
-}
-
-async function refresh() {
-  $("now").textContent = new Date().toLocaleTimeString();
-  let data;
-  try {
-    data = await (await fetch("/status", {cache: "no-store"})).json();
-  } catch (e) {
-    return;
-  }
-  const r = data.reading || {};
-  const lr = r.last_run || {};
-  const phaseEl = $("phase");
-  phaseEl.className = "pill " + (r.phase || "idle");
-  phaseEl.textContent = ({
-    running: "运行中", waiting_login: "等待登录", idle: "空闲", failed: "上次失败"
-  })[r.phase] || r.phase || "—";
-
-  $("pid").textContent = r.pid || "—";
-  $("eta").textContent = fmtSeconds(r.eta_seconds);
-  $("started_at").textContent = fmtTime(lr.started_at);
-  $("ended_at").textContent = fmtTime(lr.ended_at);
-  $("last_status").textContent = lr.status
-    ? lr.status + (lr.exit_code != null ? " (code " + lr.exit_code + ")" : "")
-    : "—";
-
-  const c = r.cookies || {};
-  $("cookies").textContent = c.status === "valid"
-    ? "valid · " + (c.age_days ? c.age_days.toFixed(1) : "?") + " 天前"
-    : c.status || "—";
-
-  const qr = r.login_qr || {};
-  const block = $("qr-block");
-  if (qr.present) {
-    block.innerHTML = '<img class="qr" src="/login.png?t=' + Date.now() + '" alt="login QR">';
-  } else {
-    block.innerHTML = '<div class="qr-empty">尚未生成二维码（cookies 有效时不会生成）</div>';
-  }
-  $("qr_age").textContent = fmtAge(qr.age_seconds);
-
-  const envEl = $("env");
-  envEl.innerHTML = "";
-  Object.entries(data.env || {}).forEach(([k, v]) => {
-    const div = document.createElement("div");
-    div.className = "row";
-    div.innerHTML = '<span class="k">' + k + '</span><span class="v">' + (v || "—") + '</span>';
-    envEl.appendChild(div);
-  });
-
-  $("start-btn").disabled = (r.phase === "running");
-  $("restart-btn").disabled = false;
-
-  // Dynamic refresh: 5s when waiting_login, 30s otherwise
-  if (_lastPhase !== r.phase) {
-    _lastPhase = r.phase;
-    _scheduleAutoRefresh(r.phase);
-  }
-}
-
-async function loadLogs() {
-  try {
-    const txt = await (await fetch("/logs?n=120", {cache: "no-store"})).text();
-    $("logs").textContent = txt || "(空)";
-    const pre = $("logs"); pre.scrollTop = pre.scrollHeight;
-  } catch {}
-}
-
-// ▶ 手动触发阅读 — 只在空闲时启动，不杀进程
-$("start-btn").addEventListener("click", async () => {
-  $("start-btn").disabled = true;
-  try {
-    const r = await fetch("/start", {method: "POST"});
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      alert("触发失败：" + (j.reason || r.status));
-    }
-  } catch (e) {
-    alert("请求失败：" + e);
-  } finally { setTimeout(() => { refresh(); loadLogs(); }, 1000); }
-});
-
-// 🔄 重启阅读 — 杀掉当前进程并重新启动（用于刷新二维码）
-$("restart-btn").addEventListener("click", async () => {
-  $("restart-btn").disabled = true;
-  $("restart-btn").textContent = "重启中…";
-  try {
-    const r = await fetch("/restart", {method: "POST"});
-    if (!r.ok) alert("重启失败：" + r.status);
-  } catch (e) {
-    alert("请求失败：" + e);
-  } finally {
-    setTimeout(() => {
-      $("restart-btn").disabled = false;
-      $("restart-btn").textContent = "🔄 重启阅读";
-      refresh();
-      loadLogs();
-    }, 6000);
-  }
-});
-
-async function loadFeishu() {
-  const res = await fetch("/api/notification", {cache: "no-store"});
-  if (!res.ok) throw new Error("加载通知配置失败");
-  const data = await res.json();
-  const cfg = data.config.webhook || {};
-  $("feishu-url").value = cfg.webhook_url || "";
-  $("feishu-secret").value = cfg.webhook_secret || "";
-  $("feishu-panel").value = cfg.panel_url || "";
-  $("feishu-save").disabled = false;
-  $("feishu-test").disabled = false;
-}
-
-$("feishu-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  $("feishu-save").disabled = true;
-  try {
-    const res = await fetch("/api/notification", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({webhook: {
-        webhook_url: $("feishu-url").value,
-        webhook_secret: $("feishu-secret").value,
-        panel_url: $("feishu-panel").value
-      }})
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.reason || "保存失败");
-    await loadFeishu();
-    $("feishu-result").textContent = "配置已保存；可发送测试通知确认。";
-  } catch (error) {
-    $("feishu-result").textContent = error.message;
-  } finally { $("feishu-save").disabled = false; }
-});
-
-$("feishu-test").addEventListener("click", async () => {
-  $("feishu-test").disabled = true;
-  $("feishu-result").textContent = "正在发送已保存配置的测试通知…";
-  try {
-    const res = await fetch("/api/notification/test", {method: "POST"});
-    const data = await res.json();
-    $("feishu-result").textContent = data.reason || "测试失败";
-  } catch {
-    $("feishu-result").textContent = "测试请求失败";
-  } finally { $("feishu-test").disabled = false; }
-});
-
-loadFeishu().catch((error) => { $("feishu-result").textContent = error.message; });
-refresh(); loadLogs();
-_scheduleAutoRefresh(null);
-</script>
-</body>
-</html>
-"""
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def _install_signal_handlers() -> None:

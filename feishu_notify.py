@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from notification_settings import load_config, reader_environment
 
 WEBHOOK_FIELDS = {
     "webhook_url": "WEBHOOK_URL",
@@ -47,13 +48,10 @@ def write_json(path: Path, data: dict) -> None:
 
 
 def load_webhook_config(data_dir: Path) -> dict:
-    saved = read_json(data_dir / "notification_config.json").get("webhook", {})
-    if not isinstance(saved, dict):
-        saved = {}
-    cfg = {}
-    for field, env_key in WEBHOOK_FIELDS.items():
-        value = os.environ.get(env_key) or saved.get(field, "")
-        cfg[field] = value.strip() if isinstance(value, str) else ""
+    settings = load_config(data_dir / "notification_config.json")["webhook"]
+    cfg = {field: settings[field] for field in WEBHOOK_FIELDS}
+    if not settings["enabled"]:
+        cfg["webhook_url"] = ""
     return cfg
 
 
@@ -142,7 +140,7 @@ def run_reader() -> int:
     notifier = LoginNotifier(data_dir)
     with subprocess.Popen(["weread-selenium-cli", "run"], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                          errors="replace", bufsize=1) as proc:
+                          errors="replace", bufsize=1, env=reader_environment(data_dir)) as proc:
         for line in proc.stdout:
             print(line, end="", flush=True)
             try:

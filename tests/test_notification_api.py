@@ -47,7 +47,9 @@ class NotificationApiTests(unittest.TestCase):
         self.assertNotIn("sign-secret", res.get_data(as_text=True))
         masked = res.json["config"]["webhook"]
         self.client.post("/api/notification", json={"webhook": masked})
-        self.assertEqual(read_json(self.config_path)["webhook"], cfg)
+        saved_webhook = read_json(self.config_path)["webhook"]
+        self.assertEqual({key: saved_webhook[key] for key in cfg}, cfg)
+        self.assertTrue(saved_webhook["enabled"])
         self.assertTrue(next(c for c in web._notification_status()["channels"] if c["name"] == "Webhook")["configured"])
 
     def test_test_notification_uses_saved_config_and_reports_failure(self):
@@ -71,6 +73,35 @@ class NotificationApiTests(unittest.TestCase):
         write_json(self.config_path, {"webhook": {"webhook_url": "https://example.test/hook"}})
         self.client.post("/api/notification", json={"webhook": {"webhook_url": ""}})
         self.assertFalse(next(c for c in web._notification_status()["channels"] if c["name"] == "Webhook")["configured"])
+
+    def test_channels_can_be_disabled_without_erasing_credentials(self):
+        write_json(self.config_path, {"bark": {"bark_key": "keep-me", "enabled": True}})
+        res = self.client.post("/api/notification", json={"bark": {"enabled": False}})
+        self.assertEqual(res.status_code, 200)
+        saved = read_json(self.config_path)["bark"]
+        self.assertEqual(saved["bark_key"], "keep-me")
+        bark = next(c for c in web._notification_status()["channels"] if c["id"] == "bark")
+        self.assertTrue(bark["configured"])
+        self.assertFalse(bark["active"])
+
+    def test_bad_url_port_or_enable_type_is_rejected(self):
+        for cfg in [{"bark": {"enabled": "false"}}, {"email": {"email_port": "70000"}},
+                    {"webhook": {"webhook_url": "file:///secret"}}]:
+            self.assertEqual(self.client.post("/api/notification", json=cfg).status_code, 400)
+
+    def test_bark_and_email_can_be_tested_from_the_dashboard(self):
+        for channel, target in [("bark", "app.send_bark"), ("email", "app.send_email")]:
+            with self.subTest(channel=channel):
+                with patch(target, return_value=(True, "sent")) as send:
+                    res = self.client.post("/api/notification/test", json={"channel": channel})
+                    self.assertEqual(res.status_code, 200)
+                    send.assert_called_once()
+
+    def test_static_assets_are_available_on_the_login_page(self):
+        client = web.app.test_client()
+        self.assertEqual(client.get("/login").status_code, 200)
+        with client.get("/static/theme.js") as response:
+            self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

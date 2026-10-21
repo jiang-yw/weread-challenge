@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}登录 · 微信读书{% endblock %}
+{% block content %}
+<main class="login-wrap">
+  <div class="card login-card">
+    <div class="section-head"><span class="brand-icon" aria-hidden="true">阅</span><button class="button subtle" type="button" data-theme-toggle>切换深色</button></div>
+    <h1>微信读书</h1>
+    <p class="muted">登录后管理阅读任务和通知。</p>
+    <form method="post" class="stack">
+      <label for="password">面板密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      {% if error %}<p class="form-result error" role="alert">密码错误，请重试。</p>{% endif %}
+      <button class="button primary" type="submit">登录管理面板</button>
+    </form>
+  </div>
+</main>
+{% endblock %}

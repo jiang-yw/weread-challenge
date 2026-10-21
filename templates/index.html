@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page">
+  <header class="page-header">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">阅</span><div><h1>微信读书</h1><p class="muted">阅读任务与登录提醒</p></div></div>
+    <div class="header-actions"><span id="connection" class="connection" role="status">正在连接…</span><button class="button subtle" type="button" data-theme-toggle>切换深色</button><a class="button subtle" href="/logout">退出</a></div>
+  </header>
+
+  <main class="dashboard">
+    <section class="card reading-card" aria-labelledby="reading-heading">
+      <div class="section-head"><h2 id="reading-heading">阅读状态</h2><span id="phase" class="badge neutral">加载中</span></div>
+      <div class="countdown-block"><span class="muted" id="eta-label">本次阅读剩余</span><div class="countdown" id="eta">—</div><p class="hint" id="run-hint">正在获取任务状态</p></div>
+      <dl class="detail-list"><div><dt>上次开始</dt><dd id="started-at">—</dd></div><div><dt>上次结束</dt><dd id="ended-at">—</dd></div><div><dt>上次结果</dt><dd id="last-result">—</dd></div></dl>
+      <div class="actions"><button id="start-btn" class="button primary" type="button">开始阅读</button><button id="restart-btn" class="button secondary" type="button">重新扫码登录</button></div>
+      <p id="action-result" class="form-result" role="status"></p>
+    </section>
+
+    <section class="card" aria-labelledby="login-heading">
+      <div class="section-head"><h2 id="login-heading">微信读书登录</h2><span class="badge neutral" id="login-badge">检查中</span></div>
+      <div id="qr-block" class="qr-block"><div class="empty-state">正在检查登录信息…</div></div>
+      <p class="hint" id="cookie-detail"></p>
+    </section>
+
+    <section class="card wide" aria-labelledby="notifications-heading">
+      <div class="section-head"><div><h2 id="notifications-heading">消息通知</h2><p class="hint">配置登录提醒与任务通知，随时发送测试消息。</p></div><button id="manage-notifications" class="button secondary" type="button" aria-expanded="false" aria-controls="notification-manager">管理通知</button></div>
+      <div id="notification-summary" class="notification-summary"><p class="muted">正在读取通知配置…</p></div>
+      <div id="notification-manager" class="notification-manager" hidden>
+        <div class="tabs" role="tablist" aria-label="通知渠道">
+          <button id="tab-webhook" class="tab" type="button" role="tab" aria-selected="true" aria-controls="channel-panel" data-channel="webhook">飞书</button>
+          <button id="tab-bark" class="tab" type="button" role="tab" aria-selected="false" aria-controls="channel-panel" data-channel="bark">Bark</button>
+          <button id="tab-email" class="tab" type="button" role="tab" aria-selected="false" aria-controls="channel-panel" data-channel="email">邮件</button>
+        </div>
+        <form id="notification-form">
+          <div id="channel-panel" role="tabpanel" aria-labelledby="tab-webhook">
+            <label class="toggle-row"><span><strong>启用此渠道</strong><span class="hint block" id="channel-description"></span></span><input id="channel-enabled" type="checkbox" role="switch"></label>
+            <div id="notification-fields" class="field-grid"></div>
+            <p id="channel-timing" class="hint"></p>
+          </div>
+          <div class="actions"><button id="notification-save" class="button primary" type="submit" disabled>保存配置</button><button id="notification-test" class="button secondary" type="button" disabled>测试已保存配置</button></div>
+          <p id="notification-result" class="form-result" role="status"></p>
+        </form>
+      </div>
+    </section>
+
+    <section class="card wide" aria-labelledby="settings-heading">
+      <div class="section-head"><div><h2 id="settings-heading">阅读设置</h2><p class="hint">当前容器的运行参数，修改后需重新创建容器。</p></div><span class="badge neutral">当前配置</span></div>
+      <div id="settings-primary" class="settings-grid"></div>
+      <details class="advanced"><summary>更多运行设置</summary><div id="settings-advanced" class="advanced-settings"></div></details>
+    </section>
+
+    <section class="card wide" aria-labelledby="logs-heading">
+      <div class="section-head"><div><h2 id="logs-heading">运行日志</h2><p class="hint">保留阅读进度、登录与异常，合并重复记录。</p></div><a class="text-link" href="/logs?n=2000" target="_blank" rel="noopener">原始日志 ↗</a></div>
+      <div class="log-toolbar"><label class="sr-only" for="log-level">日志级别</label><select id="log-level"><option value="all">全部事件</option><option value="error">异常</option><option value="warning">提醒</option><option value="success">成功</option><option value="info">进度</option></select><label class="sr-only" for="log-search">搜索日志</label><input id="log-search" type="search" placeholder="搜索日志内容"><label class="follow-label"><input id="log-follow" type="checkbox" checked>跟随新日志</label></div>
+      <div id="logs" class="log-list" tabindex="0" aria-label="最近运行日志"><p class="empty-state">正在读取日志…</p></div>
+      <div class="log-footer"><span id="log-count">最近日志</span><span id="refresh-label">每 30 秒刷新</span></div>
+    </section>
+  </main>
+  <footer class="page-footer">WeRead Challenge <span>·</span> <span id="updated-at">自动更新中</span></footer>
+</div>
+<dialog id="restart-dialog" aria-labelledby="restart-heading"><form method="dialog"><h2 id="restart-heading">重新扫码登录？</h2><p class="muted">这会结束当前阅读、清除已保存的登录信息，并生成新的登录二维码。</p><div class="actions"><button class="button secondary" value="cancel">取消</button><button class="button primary" value="confirm">重新扫码</button></div></form></dialog>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>{% endblock %}
