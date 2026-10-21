@@ -48,8 +48,20 @@ function age(seconds) {
 }
 function dateTime(value) {
   if (!value) return "尚无记录";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "未知时间" : date.toLocaleString("zh-CN", {hour12: false});
+  const date = parseTimestamp(value);
+  return date ? date.toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false}) : "未知时间";
+}
+function parseTimestamp(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  let timestamp = value.trim().replace(" ", "T");
+  // The reader and start_reading.sh write UTC; older reader records omit Z.
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp)) timestamp += "Z";
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function logTime(value) {
+  const date = parseTimestamp(value);
+  return date ? date.toLocaleTimeString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false}) : "—";
 }
 function setBadge(id, text, level) { $(id).textContent = text; $(id).className = `badge ${level}`; }
 function renderReading(reading) {
@@ -116,7 +128,7 @@ async function refresh() {
     renderSettings(data.settings || {});
     renderNotificationSummary((data.notifications || {}).channels || []);
     $("connection").textContent = "服务已连接"; $("connection").className = "connection";
-    $("updated-at").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", {hour12: false})}`;
+    $("updated-at").textContent = `更新于 ${logTime(new Date().toISOString())} · 北京时间`;
     const interval = data.reading?.phase === "waiting_login" ? 5000 : 30000;
     if (refreshInterval !== interval) {
       clearInterval(refreshTimer); refreshInterval = interval;
@@ -203,8 +215,12 @@ async function loadLogs() {
     const labels = {info: "进度", warning: "提醒", success: "成功", error: "异常"};
     list.replaceChildren(...(data.entries.length ? data.entries.map(entry => {
       const row = node("div", "log-entry");
-      const stamp = entry.timestamp?.match(/\d{2}:\d{2}:\d{2}/)?.[0] || "—";
-      const time = node("time", "log-time", stamp); time.title = entry.timestamp;
+      const time = node("time", "log-time", logTime(entry.timestamp));
+      const timestamp = parseTimestamp(entry.timestamp);
+      if (timestamp) {
+        time.dateTime = timestamp.toISOString();
+        time.title = `${dateTime(entry.timestamp)} 北京时间（UTC+8）`;
+      }
       const text = node("span", "log-text", entry.text);
       if (entry.count > 1) text.append(node("span", "log-repeat", `×${entry.count}`));
       row.append(time, node("span", `log-level ${entry.level}`, labels[entry.level] || "进度"), text); return row;
@@ -230,5 +246,6 @@ $("restart-btn").addEventListener("click", () => {
   $("restart-dialog").showModal();
 });
 $("restart-dialog").addEventListener("close", () => { if ($("restart-dialog").returnValue === "confirm") readerAction("/restart"); });
+$("logs-heading").textContent = "运行日志 · 北京时间（UTC+8）";
 refreshTimer = setInterval(() => { refresh(); loadLogs(); }, refreshInterval);
 refresh(); loadLogs();

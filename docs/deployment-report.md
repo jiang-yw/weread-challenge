@@ -23,3 +23,12 @@
 - Updated static files and templates synchronized to the existing container; container ID and start time unchanged.
 - Built-image asset hashes match source; live HTTP asset hashes, login and health checks passed on port 8860.
 - Running container continues using its original image ID; recreating from the updated image will retain the new icon.
+
+## Beijing time display fix
+
+- Completed (UTC): 2026-10-21T06:32:19.651763+00:00
+- Dashboard log, task and refresh times display in Asia/Shanghai (UTC+8).
+- Browser checks passed for timezone-less UTC records, explicit Z/offset records, next-day rollover and invalid timestamps.
+- New image: `sha256:9b34ce4eb265b2504bdcb563f8ccb18aaed7b280b6e4dcd15aac1fc1f99d8f51`.
+- Updated JavaScript and dashboard template synchronized without restarting the existing container.
+- Live JavaScript hash matches source; health check passed; original log files were not modified.

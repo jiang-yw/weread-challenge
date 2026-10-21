@@ -33,6 +33,18 @@ const chrome = require("/usr/local/lib/node_modules/weread-selenium-cli/node_mod
     await fill("password", "browser-test");
     await driver.findElement(By.css("button[type=submit]")).click();
     await waitText("connection", "服务已连接");
+    assert.match(await get("logs-heading").getText(), /北京时间/);
+    for (const [timestamp, expected] of [
+      ["2026-10-21 06:21:14.123", "14:21:14"],
+      ["2026-10-21T06:21:14.123Z", "14:21:14"],
+      ["2026-10-21T14:21:14+08:00", "14:21:14"],
+      ["2026-10-21T14:21:14+0800", "14:21:14"],
+      ["2026-10-21T23:30:00Z", "07:30:00"],
+      ["not-a-date", "—"], [null, "—"]
+    ]) {
+      assert.equal(await driver.executeScript("return logTime(arguments[0])", timestamp), expected);
+    }
+    assert.match(await driver.executeScript("return dateTime('2026-10-21T23:30:00Z')"), /2026\/10\/22/);
     assert.equal(await theme(), "dark");
     await driver.findElement(By.css("[data-theme-toggle]")).click();
     assert.equal(await theme(), "light");
@@ -74,6 +86,8 @@ const chrome = require("/usr/local/lib/node_modules/weread-selenium-cli/node_mod
     await driver.executeScript("document.getElementById('log-search').dispatchEvent(new Event('input'))");
     await get("log-level").findElement(By.css("option[value=all]")).click();
     await waitText("logs", "本次阅读已完成");
+    assert.equal(await driver.findElement(By.css(".log-time")).getText(), "20:00:00");
+    assert.match(await driver.findElement(By.css(".log-time")).getAttribute("title"), /北京时间/);
     assert.equal((await get("logs").getText()).includes("Pressed down"), false);
     await get("log-follow").click();
     await driver.executeScript("document.getElementById('logs').scrollTop=0; return loadLogs()");
